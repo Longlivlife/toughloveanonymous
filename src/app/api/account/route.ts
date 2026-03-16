@@ -1,33 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@supabase/ssr'
+import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { cookies } from 'next/headers'
+
+function makeSupabase() {
+  const cookieStore = cookies()
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() { return cookieStore.getAll() },
+        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
+          try { cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options)) } catch {}
+        },
+      },
+    }
+  )
+}
 
 export async function DELETE(request: NextRequest) {
   try {
-    const cookieStore = cookies()
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() { return cookieStore.getAll() },
-          setAll(cookiesToSet) {
-            try { cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options)) } catch {}
-          },
-        },
-      }
-    )
-
+    const supabase = makeSupabase()
     const { data: { user }, error: authError } = await supabase.auth.getUser()
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
-    }
+    if (authError || !user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
 
-    // Delete in order: junctions first, then core records
-    // testimony_people, testimony_harms
-    const { data: testimonies } = await supabase
-      .from('testimonies').select('id').eq('survivor_id', user.id)
-    const testimonyIds = (testimonies || []).map(t => t.id)
+    const { data: testimonies } = await supabase.from('testimonies').select('id').eq('survivor_id', user.id)
+    const testimonyIds = (testimonies || []).map((t: { id: string }) => t.id)
 
     if (testimonyIds.length > 0) {
       await supabase.from('testimony_people').delete().in('testimony_id', testimonyIds)
@@ -38,10 +36,6 @@ export async function DELETE(request: NextRequest) {
 
     await supabase.from('consent_records').delete().eq('survivor_id', user.id)
     await supabase.from('survivors').delete().eq('id', user.id)
-
-    // Delete the auth user — requires service role, so we do a soft delete
-    // The auth user will remain but all data is purged
-    // Full auth deletion requires service role key (Phase 2 admin panel)
     await supabase.auth.signOut()
 
     return NextResponse.json({ ok: true })
